@@ -1,0 +1,178 @@
+@import "tailwindcss";
+
+/*
+  Tailwind v4 has no tailwind.config.js. The `dark:` variant is opt-in and must
+  be declared here; we drive it from the data-theme attribute that the inline
+  script in app/layout.tsx sets before first paint (never from a media query,
+  so an explicit "Light"/"Dark" choice in Settings always wins over the OS).
+*/
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --color-brand-purple: #667eea;
+  --color-brand-deep: #764ba2;
+  --color-accent-blue: #1a73e8;
+
+  --color-sidebar-bg: #111827;
+  --color-sidebar-fg: #f3f4f6;
+
+  /*
+    Semantic tokens resolve to the CSS variables below, so `bg-background`,
+    `bg-card`, `border-border` etc. re-theme automatically. Use these for new
+    surfaces instead of hard-coding bg-white / bg-[#fcfbfe].
+  */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+
+  /*
+    Tailwind ships grays in steps of 100, but this codebase uses in-between
+    shades (border-gray-150, text-gray-650, ...) in 120+ places. Without these
+    definitions those classes compile to nothing - the "bordered" cards had no
+    border at all. Defining them here fixes every usage at once, and pointing
+    them at variables means they re-theme in dark mode for free.
+  */
+  --color-gray-150: var(--gray-150);
+  --color-gray-250: var(--gray-250);
+  --color-gray-450: var(--gray-450);
+  --color-gray-650: var(--gray-650);
+  --color-gray-750: var(--gray-750);
+  --color-gray-850: var(--gray-850);
+
+  --font-sans: var(--font-sans-custom), system-ui, sans-serif;
+}
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  --background: #fcfbfe;
+  --foreground: #1f2937;
+
+  --card: #ffffff;
+  --card-foreground: #1f2937;
+
+  --muted: #f9fafb;
+  --muted-foreground: #6b7280;
+
+  --border: #e5e7eb;
+  --ring: #667eea;
+
+  /* In-between grays: interpolated between Tailwind's 100/200 and 600/700 */
+  --gray-150: #ecedf1;
+  --gray-250: #dcdfe4;
+  --gray-450: #8d95a3;
+  --gray-650: #414b5a;
+  --gray-750: #303a4a;
+  --gray-850: #1a2231;
+
+  --font-sans-custom: "Inter", "Outfit", system-ui, sans-serif;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: #0f0e17;
+  --foreground: #f3f4f6;
+
+  --card: #161522;
+  --card-foreground: #f3f4f6;
+
+  --muted: #1c1b2a;
+  --muted-foreground: #9ca3af;
+
+  --border: #2d2b3f;
+  --ring: #764ba2;
+
+  /* Inverted for dark: borders darken, text lightens */
+  --gray-150: #2d2b3f;
+  --gray-250: #3a3852;
+  --gray-450: #7c8494;
+  --gray-650: #b6bcc7;
+  --gray-750: #d1d5db;
+  --gray-850: #e5e7eb;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans-custom);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Custom Utilities for Premium Look */
+.bg-brand-gradient {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.text-brand-gradient {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.glassmorphism {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+[data-theme="dark"] .glassmorphism {
+  background: rgba(22, 21, 34, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(102, 126, 234, 0.2);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(102, 126, 234, 0.5);
+}
+
+/* Base Form Styles */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+}
+
+/*
+  Every interactive element gets a visible keyboard focus ring. :focus-visible
+  keeps it off for mouse clicks, so the existing hover-driven design is intact.
+*/
+:where(a, button, [role="button"], summary, [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}
+
+/* Respect users who ask the OS to reduce motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
