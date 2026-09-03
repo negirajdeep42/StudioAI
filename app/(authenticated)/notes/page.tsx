@@ -18,6 +18,67 @@ import {
   Layers
 } from 'lucide-react';
 import { useStore } from '@/lib/store-context';
+import { AiError, postJson, streamTutor } from '@/lib/ai-client';
+import { Flashcard, QuizQuestion } from '@/types';
+
+/** Shape returned by /api/notes - one generation covers every output mode. */
+interface GeneratedResult {
+  title: string;
+  summary: string;
+  markdown: string;
+  flashcards: { question: string; answer: string }[];
+  quiz: {
+    question: string;
+    options: string[];
+    correctOptionIndex: number;
+    explanation: string;
+  }[];
+  importantQuestions: string[];
+}
+
+/**
+ * The four output modes are views over the same generated pack, so switching
+ * between them is instant and costs nothing extra.
+ */
+function renderView(result: GeneratedResult, mode: string): string {
+  if (mode === 'Quick Summary') {
+    return `# ${result.title}\n\n${result.summary}\n\n## Likely Exam Questions\n${result.importantQuestions
+      .map((q, i) => `${i + 1}. ${q}`)
+      .join('\n')}`;
+  }
+
+  if (mode === 'Flashcards') {
+    return (
+      `# Flashcards: ${result.title}\n\n` +
+      result.flashcards
+        .map((c, i) => `### Card ${i + 1}\n* **Front**: ${c.question}\n* **Back**: ${c.answer}`)
+        .join('\n\n')
+    );
+  }
+
+  if (mode === 'Practice Quiz' || mode === 'Quiz') {
+    return (
+      `# Practice Quiz: ${result.title}\n\n` +
+      result.quiz
+        .map(
+          (q, i) =>
+            `${i + 1}. **${q.question}**\n` +
+            q.options
+              .map(
+                (opt, oi) =>
+                  `   * ${String.fromCharCode(65 + oi)}) ${opt}${
+                    oi === q.correctOptionIndex ? ' (Correct)' : ''
+                  }`
+              )
+              .join('\n') +
+            `\n   * *Explanation*: ${q.explanation}`
+        )
+        .join('\n\n')
+    );
+  }
+
+  return result.markdown;
+}
 
 export default function NotesPage() {
   // Subjects and the saved-note library both come from the persistent store.
@@ -29,9 +90,14 @@ export default function NotesPage() {
   const [generationType, setGenerationType] = useState('Smart Notes');
   const [rawText, setRawText] = useState('');
   
-  // File Upload state
-  const [uploadedFile, setUploadedFile] = useState<{ name: string; size: string } | null>(null);
+  // File Upload state. `text` holds the extracted contents - the generator needs
+  // the actual material, not just a filename.
+  const [uploadedFile, setUploadedFile] = useState<{ name: string; size: string; text: string } | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+
+  // The full structured result, so saving keeps flashcards and quiz too.
+  const [generated, setGenerated] = useState<GeneratedResult | null>(null);
 
   // Processing state
   const [loading, setLoading] = useState(false);
@@ -56,117 +122,108 @@ export default function NotesPage() {
     }
   };
 
+  /**
+   * Reads the file's text so it can actually be sent to the model. Binary
+   * formats (PDF, DOCX) need a parser we don't have client-side, so we say so
+   * plainly instead of silently generating notes from a filename.
+   */
+  const acceptFile = async (file: File) => {
+    setUploadError('');
+    const isTextLike =
+      file.type.startsWith('text/') ||
+      /\.(txt|md|markdown|csv|json|rtf)$/i.test(file.name);
+
+    if (!isTextLike) {
+      setUploadedFile(null);
+      setUploadError(
+        `"${file.name}" is not a plain-text file. Paste the text into the box below, or upload a .txt or .md file.`
+      );
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      if (!text.trim()) {
+        setUploadError('That file looks empty.');
+        return;
+      }
+      setUploadedFile({
+        name: file.name,
+        size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+        text
+      });
+    } catch {
+      setUploadError('Could not read that file.');
+    }
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    
+
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const file = e.dataTransfer.files[0];
-      setUploadedFile({
-        name: file.name,
-        size: (file.size / (1024 * 1024)).toFixed(2) + ' MB'
-      });
+      void acceptFile(e.dataTransfer.files[0]);
     }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setUploadedFile({
-        name: file.name,
-        size: (file.size / (1024 * 1024)).toFixed(2) + ' MB'
-      });
+      void acceptFile(e.target.files[0]);
     }
   };
 
-  const handleGenerate = (e: React.FormEvent) => {
+  const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!uploadedFile && !rawText.trim()) return;
+
+    const sourceText = uploadedFile?.text || rawText;
+    if (!sourceText.trim()) return;
 
     setLoading(true);
     setOutputContent(null);
+    setGenerated(null);
+    setUploadError('');
 
-    // Multi-stage loader simulation
+    // Step the loader through its stages while the request is in flight.
     const steps = [
-      'Uploading study material...',
-      'Extracting document content...',
-      'Running AI analysis & summaries...',
-      'Formatting markdown notes...'
+      'Reading your study material...',
+      'Extracting the key concepts...',
+      'Drafting notes, flashcards and quiz...',
+      'Formatting your revision pack...'
     ];
-
     let currentStep = 0;
-    setLoadingStep(steps[currentStep]);
+    setLoadingStep(steps[0]);
+    const ticker = setInterval(() => {
+      currentStep = Math.min(currentStep + 1, steps.length - 1);
+      setLoadingStep(steps[currentStep]);
+    }, 4000);
 
-    const interval = setInterval(() => {
-      currentStep++;
-      if (currentStep < steps.length) {
-        setLoadingStep(steps[currentStep]);
-      } else {
-        clearInterval(interval);
-        
-        // Generate content based on selection
-        let output = '';
-        const sourceName = uploadedFile ? uploadedFile.name : 'Pasted Text';
-        
-        if (generationType === 'Smart Notes') {
-          output = `# Smart Notes: ${sourceName}
+    const sourceName = uploadedFile ? uploadedFile.name : 'Pasted Text';
 
-## 1. Executive Summary
-This document outlines core parameters regarding the requested topic, specifically covering scheduling policies, mutual exclusion, and transactional constraints.
+    try {
+      const result = await postJson<GeneratedResult>('/api/notes', {
+        sourceText,
+        subjectName: subjects.find((s) => s.id === selectedSubjectId)?.name,
+        sourceName
+      });
 
-## 2. Core Concepts
-* **Concurrency Constraints**: Ensuring atomic execution.
-* **Semaphores**: Variable or abstract data type used to control access to a common resource by multiple threads.
-* **Preemption Limitations**: How the kernel manages processes.
-
-## 3. Review Questions
-1. Detail the critical difference between binary semaphores and lock mutexes.
-2. In what scenarios does starvation occur under priority scheduling algorithms?`;
-        } else if (generationType === 'Quick Summary') {
-          output = `# Quick Summary: ${sourceName}
-
-**Overview**: The uploaded material focuses on synchronisation overhead in modern OS kernels. It details how locks protect resources but introduce bottlenecks.
-
-**Key Takeaways**:
-* CPU scheduling algorithms dictate wait times.
-* Mutex ownership ensures data safety but can result in priority inversion.
-* Developers must minimize lock holding periods to optimize multicore scaling.`;
-        } else if (generationType === 'Flashcards') {
-          output = `# Generated Flashcards
-
-### Flashcard 1
-* **Front**: What is the primary difference between a process and a thread?
-* **Back**: A process has its own address space, whereas threads of the same process share memory.
-
-### Flashcard 2
-* **Front**: What does ACID stand for in DBMS?
-* **Back**: Atomicity, Consistency, Isolation, Durability.`;
-        } else {
-          output = `# AI Generated Practice Quiz
-
-1. **Which of the following is NOT an ACID property?**
-   * A) Atomicity
-   * B) Consistency
-   * C) Concurrency (Correct)
-   * D) Durability
-   * *Explanation*: ACID stands for Atomicity, Consistency, Isolation, Durability. Concurrency is not one of them.
-
-2. **In OS, a critical section is a program segment:**
-   * A) Where shared resources are accessed (Correct)
-   * B) Which executes in user mode only
-   * C) Which handles system startup
-   * D) Protected from virtual memory faults`;
+      setGenerated(result);
+      setOutputContent(renderView(result, generationType));
+      setChatLogs([
+        {
+          sender: 'ai',
+          text: `I've read "${sourceName}" and built your ${generationType.toLowerCase()}. Ask me anything about it.`
         }
-
-        setOutputContent(output);
-        setLoading(false);
-        setChatLogs([
-          { sender: 'ai', text: `I have parsed "${sourceName}" and generated your ${generationType}! You can read the output or ask me specific questions about it here.` }
-        ]);
-      }
-    }, 1200);
+      ]);
+    } catch (error) {
+      const message = error instanceof AiError ? error.message : 'Generation failed. Please try again.';
+      setUploadError(message);
+    } finally {
+      clearInterval(ticker);
+      setLoading(false);
+    }
   };
+
 
   const handleCopy = () => {
     if (!outputContent) return;
@@ -176,50 +233,83 @@ This document outlines core parameters regarding the requested topic, specifical
   };
 
   const handleSaveToLibrary = () => {
-    if (!outputContent) return;
+    if (!generated || !outputContent) return;
     const subject = subjects.find((s) => s.id === selectedSubjectId);
-    const sourceName = uploadedFile ? uploadedFile.name : 'Pasted Text';
+
+    const flashcards: Flashcard[] = generated.flashcards.map((c, i) => ({
+      id: `fc-${i}`,
+      question: c.question,
+      answer: c.answer
+    }));
+
+    const quiz: QuizQuestion[] = generated.quiz.map((q, i) => ({
+      id: `q-${i}`,
+      question: q.question,
+      options: q.options,
+      correctOptionIndex: q.correctOptionIndex,
+      explanation: q.explanation
+    }));
 
     saveNote({
-      title: `${generationType}: ${sourceName}`,
+      title: generated.title,
       subjectId: selectedSubjectId,
       subjectName: subject?.name ?? 'General',
       content: outputContent,
-      // The first non-heading line doubles as the card preview.
-      summary: outputContent.split('\n').find((l) => l.trim() && !l.startsWith('#'))?.slice(0, 140) ?? '',
-      flashcards: [],
-      quiz: [],
-      importantQuestions: []
+      summary: generated.summary,
+      flashcards,
+      quiz,
+      importantQuestions: generated.importantQuestions
     });
 
-    setSavedFeedback('Saved to your library.');
-    setTimeout(() => setSavedFeedback(''), 2500);
+    setSavedFeedback(
+      `Saved "${generated.title}" with ${flashcards.length} flashcards and ${quiz.length} quiz questions.`
+    );
+    setTimeout(() => setSavedFeedback(''), 3500);
   };
 
-  const handleChatSubmit = (e: React.FormEvent) => {
+  const handleChatSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || chatLoading) return;
 
     const userQuery = chatInput;
+    const priorLogs = chatLogs;
     setChatLogs(prev => [...prev, { sender: 'user', text: userQuery }]);
     setChatInput('');
     setChatLoading(true);
 
-    setTimeout(() => {
-      let response = `Based on your uploaded study guide, here is the answer: 
+    // Grounds the answer in the uploaded material rather than general knowledge.
+    const documentContext = uploadedFile?.text || rawText || generated?.markdown;
 
-The primary issue highlighted is resource contention. When multiple processes request access to the same database row, locks are placed which queue additional processes. You can optimize this by normalizing tables or indexing foreign keys.`;
-      
-      if (userQuery.toLowerCase().includes('quiz')) {
-        response = `Here is a quick question from your document:
+    setChatLogs(prev => [...prev, { sender: 'ai', text: '' }]);
 
-**What condition occurs when process A waits for resource B held by process B, which is waiting for resource A?**
-*Answer*: Circular Wait (Deadlock condition).`;
-      }
-      
-      setChatLogs(prev => [...prev, { sender: 'ai', text: response }]);
+    try {
+      await streamTutor(
+        {
+          // Skip the canned greeting - it isn't part of the real exchange.
+          messages: [
+            ...priorLogs.slice(1).map((m) => ({
+              role: (m.sender === 'ai' ? 'assistant' : 'user') as 'user' | 'assistant',
+              content: m.text
+            })),
+            { role: 'user' as const, content: userQuery }
+          ],
+          subject: subjects.find((s) => s.id === selectedSubjectId)?.name,
+          documentContext
+        },
+        (chunk) => {
+          setChatLogs(prev =>
+            prev.map((m, i) => (i === prev.length - 1 ? { ...m, text: m.text + chunk } : m))
+          );
+        }
+      );
+    } catch (error) {
+      const message = error instanceof AiError ? error.message : 'Something went wrong. Please try again.';
+      setChatLogs(prev =>
+        prev.map((m, i) => (i === prev.length - 1 ? { ...m, text: `⚠️ ${message}` } : m))
+      );
+    } finally {
       setChatLoading(false);
-    }, 1500);
+    }
   };
 
   return (
@@ -336,7 +426,11 @@ The primary issue highlighted is resource contention. When multiple processes re
                 <button
                   key={opt.name}
                   type="button"
-                  onClick={() => setGenerationType(opt.name)}
+                  onClick={() => {
+                    setGenerationType(opt.name);
+                    // Views are derived from one generation, so switching is free.
+                    if (generated) setOutputContent(renderView(generated, opt.name));
+                  }}
                   className={`p-2.5 border rounded-xl text-xs font-semibold cursor-pointer flex items-center gap-2 transition-all ${
                     generationType === opt.name 
                       ? 'border-brand-purple bg-purple-50 dark:bg-purple-500/10 text-brand-purple shadow-sm' 
@@ -388,6 +482,15 @@ The primary issue highlighted is resource contention. When multiple processes re
                   Upload a PDF textbook or paste a raw draft on the left, then click Generate to create active recall materials.
                 </p>
               </div>
+            </div>
+          )}
+
+          {uploadError && (
+            <div
+              role="alert"
+              className="bg-red-50 dark:bg-red-500/10 border border-red-200 text-red-700 dark:text-red-400 text-xs font-bold p-3 rounded-xl"
+            >
+              {uploadError}
             </div>
           )}
 

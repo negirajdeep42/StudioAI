@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useStore } from '@/lib/store-context';
 import { formatMinutes } from '@/lib/utils';
+import { AiError, streamTutor } from '@/lib/ai-client';
 import {
   mockDeadlines,
   mockRecommendations
@@ -55,25 +56,31 @@ export default function DashboardPage() {
     return 'Good Evening';
   };
 
-  const handleAiSearch = (e: React.FormEvent) => {
+  const handleAiSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!aiInput.trim()) return;
+    if (!aiInput.trim() || aiLoading) return;
 
+    const question = aiInput;
     setAiLoading(true);
-    setAiResponse(null);
+    setAiResponse('');
 
-    // Simulate AI tutor generation
-    setTimeout(() => {
-      setAiResponse(
-        `Based on your query "${aiInput}", here is a structured breakdown:
-1. **Core Concept**: This relates directly to ${user?.degree || 'your courses'}.
-2. **Key Terms**: Normalization, BFS/DFS, Scheduling.
-3. **Recommended Study Route**: Check out the generated notes in the AI Notes section or ask me to quiz you on this topic directly!
-
-Would you like to generate a smart study guide or create a quick flashcard deck for this?`
+    try {
+      // Streams straight into the panel, so the answer appears as it is written.
+      await streamTutor(
+        {
+          messages: [{ role: 'user', content: question }],
+          subject: subjects.map((s) => s.name).join(', '),
+          mode: 'Explain'
+        },
+        (chunk) => setAiResponse((prev) => (prev ?? '') + chunk)
       );
+    } catch (error) {
+      setAiResponse(
+        `⚠️ ${error instanceof AiError ? error.message : 'Something went wrong. Please try again.'}`
+      );
+    } finally {
       setAiLoading(false);
-    }, 1800);
+    }
   };
 
   const selectSuggestion = (text: string) => {

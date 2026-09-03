@@ -7,7 +7,8 @@ import {
   MessageSquare,  
   Info
 } from 'lucide-react';
-import { mockSubjects } from '@/lib/mock-data';
+import { useStore } from '@/lib/store-context';
+import { AiError, streamTutor } from '@/lib/ai-client';
 
 interface ChatSession {
   id: string;
@@ -24,6 +25,8 @@ interface Message {
 }
 
 export default function AiTutorPage() {
+  const { subjects } = useStore();
+
   const [sessions, setSessions] = useState<ChatSession[]>([
     { id: 's1', title: 'Normalisation Normal Forms (1NF-3NF)', subjectName: 'DBMS', date: 'Today' },
     { id: 's2', title: 'Critical Section Solutions (Mutex/Sem)', subjectName: 'Operating Systems', date: 'Yesterday' },
@@ -34,88 +37,74 @@ export default function AiTutorPage() {
   // Input states
   const [inputText, setInputText] = useState('');
   const [activeMode, setActiveMode] = useState<'Explain' | 'Teach Me' | 'Quiz Me' | 'Give Me a Hint' | 'Step-by-Step'>('Explain');
-  const [selectedSubjectId, setSelectedSubjectId] = useState(mockSubjects[0].id);
+  const [selectedSubjectId, setSelectedSubjectId] = useState(subjects[0].id);
   const [selectedDifficulty, setSelectedDifficulty] = useState('Medium');
 
   // Chat message state
   const [messages, setMessages] = useState<Message[]>([
     { id: 'm1', sender: 'ai', text: `Hi! I am your AI Study Tutor. I'm ready to explain complex ideas, run interactive quizzes, or review code. 
 
-Currently, I'm configured in **${activeMode}** mode for **${mockSubjects.find(s => s.id === selectedSubjectId)?.name || 'your subjects'}**. How can I help you today?`, timestamp: '12:45 PM' }
+Currently, I'm configured in **${activeMode}** mode for **${subjects.find(s => s.id === selectedSubjectId)?.name || 'your subjects'}**. How can I help you today?`, timestamp: '12:45 PM' }
   ]);
   const [chatLoading, setChatLoading] = useState(false);
 
   const modes = ['Explain', 'Teach Me', 'Quiz Me', 'Give Me a Hint', 'Step-by-Step'] as const;
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim() || chatLoading) return;
+
+    const now = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const userMessage: Message = {
       id: `u-${Date.now()}`,
       sender: 'user',
       text: inputText,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      timestamp: now()
     };
+
+    // Claude needs the whole thread each turn - the API is stateless.
+    const history = [...messages, userMessage].map((m) => ({
+      role: (m.sender === 'ai' ? 'assistant' : 'user') as 'user' | 'assistant',
+      content: m.text
+    }));
 
     setMessages(prev => [...prev, userMessage]);
     setInputText('');
     setChatLoading(true);
 
-    // Simulate tutor responses based on active mode
-    setTimeout(() => {
-      let responseText = '';
-      const subject = mockSubjects.find(s => s.id === selectedSubjectId)?.name || 'the course';
-      
-      if (activeMode === 'Explain') {
-        responseText = `Let's break down your question regarding "${userMessage.text}" in the context of **${subject}**:
+    // Empty assistant bubble that fills in as tokens arrive.
+    const replyId = `ai-${Date.now()}`;
+    setMessages(prev => [...prev, { id: replyId, sender: 'ai', text: '', timestamp: now() }]);
 
-Here is the simple explanation:
-1. **Core Idea**: This concept ensures that all operations are managed safely and concurrently.
-2. **Key Analogy**: Think of it like a librarian managing a single copy of a highly demanded book. Instead of letting everyone grab it, they maintain a waitlist.
-3. **Implications**: Without this control, you encounter race conditions or integrity faults.
-
-Does this explanation help, or would you like me to write a quick step-by-step example?`;
-      } else if (activeMode === 'Quiz Me') {
-        responseText = `Great! Here is a custom **${selectedDifficulty}** difficulty quiz question based on your query:
-
-**Question**: In CPU scheduling, what is the primary drawback of Shortest Job First (SJF) scheduling?
-* A) Starvation of longer processes
-* B) High average waiting time
-* C) Convoy effect
-* D) Low throughput
-
-*Reply with your choice (A, B, C, or D) and I will explain if it is correct!*`;
-      } else if (activeMode === 'Give Me a Hint') {
-        responseText = `Here's a hint for solving that problem: 
-Try to think about the base cases first. If you are using recursion, what is the smallest subproblem that you know the answer to? Draw out the recursion tree for N=3 and N=4 to see if a overlapping subproblem pattern emerges.`;
-      } else {
-        responseText = `Let's approach "${userMessage.text}" step-by-step:
-* **Step 1**: Identify the input format and constraints.
-* **Step 2**: Formulate the state transition equation.
-* **Step 3**: Implement a memoization table to store overlapping subproblems.
-* **Step 4**: Compute bottom-up values.
-
-Let me know which step you'd like to code first!`;
-      }
-
-      const aiMessage: Message = {
-        id: `ai-${Date.now()}`,
-        sender: 'ai',
-        text: responseText,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-
-      setMessages(prev => [...prev, aiMessage]);
+    try {
+      await streamTutor(
+        {
+          messages: history,
+          subject: subjects.find(s => s.id === selectedSubjectId)?.name,
+          difficulty: selectedDifficulty,
+          mode: activeMode
+        },
+        (chunk) => {
+          setMessages(prev =>
+            prev.map(m => (m.id === replyId ? { ...m, text: m.text + chunk } : m))
+          );
+        }
+      );
+    } catch (error) {
+      const message = error instanceof AiError ? error.message : 'Something went wrong. Please try again.';
+      setMessages(prev => prev.map(m => (m.id === replyId ? { ...m, text: `⚠️ ${message}` } : m)));
+    } finally {
       setChatLoading(false);
-    }, 1500);
+    }
   };
+
 
   const startNewConversation = () => {
     const newSession: ChatSession = {
       id: `s-${Date.now()}`,
-      title: `New Doubt: ${mockSubjects.find(s => s.id === selectedSubjectId)?.name}`,
-      subjectName: mockSubjects.find(s => s.id === selectedSubjectId)?.code || 'GEN',
+      title: `New Doubt: ${subjects.find(s => s.id === selectedSubjectId)?.name}`,
+      subjectName: subjects.find(s => s.id === selectedSubjectId)?.code || 'GEN',
       date: 'Today'
     };
 
@@ -125,7 +114,7 @@ Let me know which step you'd like to code first!`;
       { 
         id: `m-new`, 
         sender: 'ai', 
-        text: `New conversation started about **${mockSubjects.find(s => s.id === selectedSubjectId)?.name}**. Ask me any conceptual question!`, 
+        text: `New conversation started about **${subjects.find(s => s.id === selectedSubjectId)?.name}**. Ask me any conceptual question!`, 
         timestamp: 'Just now' 
       }
     ]);
@@ -194,11 +183,11 @@ Let me know which step you'd like to code first!`;
               value={selectedSubjectId}
               onChange={(e) => {
                 setSelectedSubjectId(e.target.value);
-                setMessages(prev => [...prev, { id: `sys-${Date.now()}`, sender: 'ai', text: `Switched topic context to **${mockSubjects.find(s => s.id === e.target.value)?.name}**.`, timestamp: 'System' }]);
+                setMessages(prev => [...prev, { id: `sys-${Date.now()}`, sender: 'ai', text: `Switched topic context to **${subjects.find(s => s.id === e.target.value)?.name}**.`, timestamp: 'System' }]);
               }}
               className="px-3 py-1.5 bg-white dark:bg-card border border-gray-250 rounded-xl text-[10px] font-bold focus:border-brand-purple"
             >
-              {mockSubjects.map(s => (
+              {subjects.map(s => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>

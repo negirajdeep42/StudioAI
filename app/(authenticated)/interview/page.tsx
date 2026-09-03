@@ -12,6 +12,7 @@ import {
   X
 } from 'lucide-react';
 import { mockInterviewQuestions as initialQuestions } from '@/lib/mock-data';
+import { AiError, postJson, streamTutor } from '@/lib/ai-client';
 
 export default function InterviewPrepPage() {
   // Config states
@@ -22,6 +23,8 @@ export default function InterviewPrepPage() {
   // Question list state
   const [questions, setQuestions] = useState(initialQuestions);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [configError, setConfigError] = useState('');
 
   // Mock interview state
   const [isInterviewing, setIsInterviewing] = useState(false);
@@ -36,41 +39,76 @@ export default function InterviewPrepPage() {
     setExpandedId(expandedId === id ? null : id);
   };
 
-  const handleUpdateConfig = (e: React.FormEvent) => {
+  const handleUpdateConfig = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Simulate updating list context
-    setQuestions(initialQuestions.filter(q => q.role === role || q.category === 'Behavioral' || q.category === 'HR'));
+    setGenerating(true);
+    setConfigError('');
+
+    try {
+      const result = await postJson<{
+        questions: { question: string; answer: string; category: 'Technical' | 'Behavioral' | 'HR' }[];
+      }>('/api/interview', { role, experience, technologies: techStack, count: 8 });
+
+      setQuestions(
+        result.questions.map((q, i) => ({
+          id: `q-${Date.now()}-${i}`,
+          question: q.question,
+          answer: q.answer,
+          category: q.category,
+          role
+        }))
+      );
+      setExpandedId(null);
+    } catch (error) {
+      setConfigError(
+        error instanceof AiError ? error.message : 'Could not generate questions. Try again.'
+      );
+    } finally {
+      setGenerating(false);
+    }
   };
 
-  const handleSendInterviewMessage = (e: React.FormEvent) => {
+  const handleSendInterviewMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!interviewText.trim() || interviewLoading) return;
 
     const candidateMsg = interviewText;
+    const priorLogs = interviewLogs;
     setInterviewLogs(prev => [...prev, { speaker: 'candidate', text: candidateMsg }]);
     setInterviewText('');
     setInterviewLoading(true);
+    setInterviewStep(s => s + 1);
 
-    setTimeout(() => {
-      let nextQuestion = '';
-      let feedback = '';
+    setInterviewLogs(prev => [...prev, { speaker: 'interviewer', text: '' }]);
 
-      if (interviewStep === 0) {
-        feedback = 'Great! Your explanation of memory space sharing was clear, though you could mention thread sync overhead.';
-        nextQuestion = 'Excellent. Let\'s move to Database Management. What is normalization in databases, and why do we need it?';
-        setInterviewStep(1);
-      } else {
-        feedback = 'Well done! You correctly identified redundancy reduction and anomaly prevention.';
-        nextQuestion = 'Perfect. Last behavioral question: Tell me about a time you had to resolve conflicts in a team project.';
-        setInterviewStep(2);
-      }
-
-      setInterviewLogs(prev => [
-        ...prev, 
-        { speaker: 'interviewer', text: nextQuestion, feedback }
-      ]);
+    try {
+      await streamTutor(
+        {
+          messages: [
+            ...priorLogs.map((l) => ({
+              role: (l.speaker === 'interviewer' ? 'assistant' : 'user') as 'user' | 'assistant',
+              content: l.text
+            })),
+            { role: 'user' as const, content: candidateMsg }
+          ],
+          subject: `${role} interview${techStack ? ` (${techStack})` : ''}`,
+          difficulty: experience,
+          mode: 'Interview'
+        },
+        (chunk) => {
+          setInterviewLogs(prev =>
+            prev.map((l, i) => (i === prev.length - 1 ? { ...l, text: l.text + chunk } : l))
+          );
+        }
+      );
+    } catch (error) {
+      const message = error instanceof AiError ? error.message : 'Something went wrong. Please try again.';
+      setInterviewLogs(prev =>
+        prev.map((l, i) => (i === prev.length - 1 ? { ...l, text: `⚠️ ${message}` } : l))
+      );
+    } finally {
       setInterviewLoading(false);
-    }, 1500);
+    }
   };
 
   return (
@@ -135,11 +173,29 @@ export default function InterviewPrepPage() {
               />
             </div>
 
+            {configError && (
+              <div
+                role="alert"
+                className="bg-red-50 dark:bg-red-500/10 border border-red-200 text-red-700 dark:text-red-400 text-xs font-bold p-3 rounded-xl"
+              >
+                {configError}
+              </div>
+            )}
+
             <button
               type="submit"
-              className="w-full bg-white dark:bg-card border border-gray-250 text-gray-700 dark:text-gray-200 py-3 rounded-xl font-bold hover:bg-gray-50 dark:hover:bg-muted transition-all text-xs cursor-pointer flex items-center justify-center gap-1.5"
+              disabled={generating}
+              className="w-full bg-brand-gradient text-white py-3 rounded-xl font-bold hover:shadow-md transition-all text-xs cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              Update Target Context
+              {generating ? (
+                <>
+                  <Sparkles className="h-3.5 w-3.5 animate-spin" /> Generating questions...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-3.5 w-3.5" /> Generate Questions
+                </>
+              )}
             </button>
           </form>
 

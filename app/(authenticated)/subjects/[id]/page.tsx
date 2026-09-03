@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useParams } from 'next/navigation';
 import { useStore } from '@/lib/store-context';
+import { AiError, streamTutor } from '@/lib/ai-client';
 import { TopicProgress } from '@/types';
 import { 
   ArrowLeft,  
@@ -75,31 +76,49 @@ export default function SubjectDetailsPage() {
   ]);
   const [aiChatLoading, setAiChatLoading] = useState(false);
 
-  const handleAiChatSubmit = (e: React.FormEvent) => {
+  const handleAiChatSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!aiChatInput.trim() || aiChatLoading) return;
 
     const userMsg = aiChatInput;
+    const priorLogs = aiChatLogs;
     setAiChatLogs(prev => [...prev, { sender: 'user', text: userMsg }]);
     setAiChatInput('');
     setAiChatLoading(true);
 
-    setTimeout(() => {
-      let aiText = '';
-      if (userMsg.toLowerCase().includes('deadlock')) {
-        aiText = `Deadlock occurs when four conditions hold simultaneously:
-1. **Mutual Exclusion**: Resources cannot be shared.
-2. **Hold and Wait**: Process holds a resource and requests more.
-3. **No Preemption**: Resources cannot be forcibly taken.
-4. **Circular Wait**: A dependency cycle exists.
+    setAiChatLogs(prev => [...prev, { sender: 'ai', text: '' }]);
 
-To handle deadlocks, we can use *prevention* (deny a condition), *avoidance* (e.g. Banker's Algorithm), or *detection and recovery*.`;
-      } else {
-        aiText = `Got it! Let's explore that topic in ${subject.name}. Could you specify if you'd like a summary, a mock interview question, or a quick multiple-choice quiz on this concept?`;
-      }
-      setAiChatLogs(prev => [...prev, { sender: 'ai', text: aiText }]);
+    try {
+      await streamTutor(
+        {
+          // Drop the canned greeting; keep the rest of the exchange.
+          messages: [
+            ...priorLogs.slice(1).map((m) => ({
+              role: (m.sender === 'ai' ? 'assistant' : 'user') as 'user' | 'assistant',
+              content: m.text
+            })),
+            { role: 'user' as const, content: userMsg }
+          ],
+          // Tell the tutor which topics this subject actually covers.
+          subject: `${subject.name} (${subject.code}). Syllabus topics: ${subject.topics
+            .map((t) => t.name)
+            .join(', ')}`,
+          mode: 'Explain'
+        },
+        (chunk) => {
+          setAiChatLogs(prev =>
+            prev.map((m, i) => (i === prev.length - 1 ? { ...m, text: m.text + chunk } : m))
+          );
+        }
+      );
+    } catch (error) {
+      const message = error instanceof AiError ? error.message : 'Something went wrong. Please try again.';
+      setAiChatLogs(prev =>
+        prev.map((m, i) => (i === prev.length - 1 ? { ...m, text: `⚠️ ${message}` } : m))
+      );
+    } finally {
       setAiChatLoading(false);
-    }, 1500);
+    }
   };
 
   const handleQuizAnswer = (idx: number) => {

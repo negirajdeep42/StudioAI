@@ -12,36 +12,38 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { useStore } from '@/lib/store-context';
+import { AiError, postJson } from '@/lib/ai-client';
 import { StudyPlanTask } from '@/types';
+import { createId } from '@/lib/utils';
 
 /** Today's schedule is stored under this key alongside the weekday entries. */
 const TODAY_KEY = 'Today';
 
-const SEED_DAILY: StudyPlanTask[] = [
-  { id: 'pt1', topic: 'Process Synchronisation & Semaphores', subjectName: 'Operating Systems', durationMinutes: 45, type: 'Read Notes', timeSlot: '09:00 AM', completed: false },
-  { id: 'pt2', topic: 'Thread Safety & Producer-Consumer', subjectName: 'Java Programming', durationMinutes: 60, type: 'Practice', timeSlot: '11:00 AM', completed: false },
-  { id: 'pt3', topic: 'SQL Joins & Indexing Mock Quiz', subjectName: 'Database Management Systems', durationMinutes: 30, type: 'Quiz', timeSlot: '04:00 PM', completed: false }
-];
+/** Shape returned by /api/study-plan. */
+interface PlanResult {
+  today: (Omit<StudyPlanTask, 'id' | 'completed'> & { timeSlot: string })[];
+  monday: Omit<StudyPlanTask, 'id' | 'completed'>[];
+  tuesday: Omit<StudyPlanTask, 'id' | 'completed'>[];
+  wednesday: Omit<StudyPlanTask, 'id' | 'completed'>[];
+  thursday: Omit<StudyPlanTask, 'id' | 'completed'>[];
+  friday: Omit<StudyPlanTask, 'id' | 'completed'>[];
+  rationale: string;
+}
 
-const SEED_WEEKLY: Record<string, StudyPlanTask[]> = {
-  'Monday': [
-    { id: 'm1', topic: 'Deadlock Conditions', subjectName: 'Operating Systems', durationMinutes: 45, type: 'Read Notes', completed: false },
-    { id: 'm2', topic: 'Binary Tree Traversals', subjectName: 'Data Structures and Algorithms', durationMinutes: 60, type: 'Practice', completed: false }
-  ],
-  'Tuesday': [
-    { id: 't1', topic: 'Relational Algebra', subjectName: 'Database Management Systems', durationMinutes: 45, type: 'Read Notes', completed: false },
-    { id: 't2', topic: 'OS Memory Partitioning', subjectName: 'Operating Systems', durationMinutes: 60, type: 'Revision', completed: false }
-  ],
-  'Wednesday': [
-    { id: 'w1', topic: 'Graph DFS/BFS traversal', subjectName: 'Data Structures and Algorithms', durationMinutes: 90, type: 'Practice', completed: false }
-  ],
-  'Thursday': [
-    { id: 'th1', topic: 'Normalisation (1NF, 2NF, 3NF)', subjectName: 'Database Management Systems', durationMinutes: 60, type: 'Quiz', completed: false }
-  ],
-  'Friday': [
-    { id: 'f1', topic: 'Java Stream API filter/maps', subjectName: 'Java Programming', durationMinutes: 45, type: 'Practice', completed: false }
-  ]
-};
+/** Adds the ids and completion flags the store needs, which the model doesn't supply. */
+function toWeeklyTasks(result: PlanResult): Record<string, StudyPlanTask[]> {
+  const withIds = (tasks: Omit<StudyPlanTask, 'id' | 'completed'>[]): StudyPlanTask[] =>
+    tasks.map((t) => ({ ...t, id: createId('pt'), completed: false }));
+
+  return {
+    [TODAY_KEY]: withIds(result.today),
+    Monday: withIds(result.monday),
+    Tuesday: withIds(result.tuesday),
+    Wednesday: withIds(result.wednesday),
+    Thursday: withIds(result.thursday),
+    Friday: withIds(result.friday)
+  };
+}
 
 export default function StudyPlanPage() {
   // Plan Form State
@@ -54,7 +56,9 @@ export default function StudyPlanPage() {
 
   // The generated plan lives in the persistent store, so it is still here after
   // a reload instead of dropping the user back on the empty-state form.
-  const { studyPlan, savePlan, togglePlanTask } = useStore();
+  const { studyPlan, savePlan, togglePlanTask, subjects } = useStore();
+  const [planError, setPlanError] = useState('');
+  const [rationale, setRationale] = useState('');
   const planGenerated = studyPlan !== null;
 
   const dailyTasks = studyPlan?.weeklyTasks[TODAY_KEY] ?? [];
@@ -68,40 +72,86 @@ export default function StudyPlanPage() {
 
   const [showReplanWarning, setShowReplanWarning] = useState(true);
 
-  const handleGenerate = (e: React.FormEvent) => {
+  const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
 
-    setTimeout(() => {
+    setPlanError('');
+
+    try {
+      // Give the model the real subject state so it targets actual gaps.
+      const result = await postJson<PlanResult>('/api/study-plan', {
+        goal,
+        examDate,
+        dailyHours,
+        difficulty,
+        knowledgeLevel,
+        preferredTime,
+        subjects: subjects.map((s) => ({
+          name: s.name,
+          progress: s.progress,
+          weakTopics: s.topics.filter((t) => t.status !== 'Completed').map((t) => t.name)
+        }))
+      });
+
       savePlan({
         goal,
         targetDate: examDate,
         dailyHours,
         difficulty,
-        weeklyTasks: { [TODAY_KEY]: SEED_DAILY, ...SEED_WEEKLY }
+        weeklyTasks: toWeeklyTasks(result)
       });
-      setShowReplanWarning(true);
+      setRationale(result.rationale);
+      setShowReplanWarning(false);
+    } catch (error) {
+      setPlanError(error instanceof AiError ? error.message : 'Could not build your plan. Try again.');
+    } finally {
       setLoading(false);
-    }, 1500);
+    }
   };
 
-  const handleReplan = () => {
+  const handleReplan = async () => {
     if (!studyPlan) return;
     setLoading(true);
-    setTimeout(() => {
-      // Push unfinished sessions later in the day, keeping completed ones put.
-      savePlan({
-        ...studyPlan,
-        weeklyTasks: {
-          ...studyPlan.weeklyTasks,
-          [TODAY_KEY]: dailyTasks.map(t =>
-            t.completed ? t : { ...t, timeSlot: t.timeSlot === '11:00 AM' ? '01:00 PM' : '05:30 PM' }
-          )
-        }
+    setPlanError('');
+
+    const done = Object.values(studyPlan.weeklyTasks)
+      .flat()
+      .filter((t) => t.completed)
+      .map((t) => t.topic);
+
+    try {
+      // Re-plan around what's actually finished, rather than shuffling clock times.
+      const result = await postJson<PlanResult>('/api/study-plan', {
+        goal: `${studyPlan.goal} (re-planning mid-week)`,
+        examDate: studyPlan.targetDate,
+        dailyHours: studyPlan.dailyHours,
+        difficulty: studyPlan.difficulty,
+        knowledgeLevel,
+        preferredTime,
+        subjects: subjects.map((s) => ({
+          name: s.name,
+          progress: s.progress,
+          weakTopics: s.topics
+            .filter((t) => t.status !== 'Completed' && !done.includes(t.name))
+            .map((t) => t.name)
+        }))
       });
+
+      savePlan({
+        goal: studyPlan.goal,
+        targetDate: studyPlan.targetDate,
+        dailyHours: studyPlan.dailyHours,
+        difficulty: studyPlan.difficulty,
+        weeklyTasks: toWeeklyTasks(result)
+      });
+      setRationale(result.rationale);
       setShowReplanWarning(false);
+    } catch (error) {
+      setPlanError(error instanceof AiError ? error.message : 'Could not re-plan. Try again.');
+    } finally {
       setLoading(false);
-    }, 1000);
+    }
   };
 
   const toggleTask = (id: string) => togglePlanTask(TODAY_KEY, id);
@@ -113,6 +163,25 @@ export default function StudyPlanPage() {
         <h1 className="text-2xl font-extrabold text-gray-900 dark:text-gray-50">AI Study Planner</h1>
         <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Build automated calendars structured to help you pass exams and placements</p>
       </div>
+
+      {planError && (
+        <div
+          role="alert"
+          className="bg-red-50 dark:bg-red-500/10 border border-red-200 text-red-700 dark:text-red-400 text-xs font-bold p-3.5 rounded-2xl"
+        >
+          {planError}
+        </div>
+      )}
+
+      {rationale && planGenerated && (
+        <div className="bg-purple-50/60 dark:bg-purple-500/10 border border-purple-100 dark:border-purple-500/20 rounded-2xl p-4 flex items-start gap-3">
+          <Sparkles className="h-4.5 w-4.5 text-brand-purple shrink-0 mt-0.5" />
+          <div>
+            <p className="text-[10px] font-bold text-brand-purple uppercase tracking-wider">Why this plan</p>
+            <p className="text-xs text-gray-700 dark:text-gray-200 font-medium mt-1">{rationale}</p>
+          </div>
+        </div>
+      )}
 
       {showReplanWarning && planGenerated && (
         <div className="bg-red-50 dark:bg-red-500/10 border border-red-200 rounded-2xl p-4 flex items-center justify-between gap-4 animate-in slide-in-from-top-3 duration-250">

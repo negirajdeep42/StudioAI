@@ -1,24 +1,68 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI StudyOS
+
+An AI-powered study companion for university CS students: organise subjects, turn
+source material into revision notes, plan a week of study, practise interviews, and
+track coding progress.
+
+Built with Next.js 16 (App Router), React 19, TypeScript and Tailwind CSS v4.
 
 ## Getting Started
 
-First, run the development server:
+Install dependencies:
+
+```bash
+npm install
+```
+
+### Configure the AI features
+
+The note generator, tutor chat, study planner and interview prep call the
+Anthropic API, so they need a key:
+
+```bash
+cp .env.example .env.local
+```
+
+Then put your key in `.env.local`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Get one from the [Anthropic Console](https://console.anthropic.com/settings/keys).
+`.env.local` is gitignored — never commit your key.
+
+Without a key the app still runs; the AI surfaces just show a "not configured"
+message instead of failing.
+
+### Run it
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## How it works
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Auth** is a client-side demo (`lib/auth-context.tsx`) — any email with an
+  8+ character password signs in. There is no server-side session.
+- **Data** persists to `localStorage` via `lib/store-context.tsx`: subjects,
+  tasks, saved notes, study plans, coding goals and study minutes.
+- **AI** runs server-side in Route Handlers under `app/api/`, so the API key
+  never reaches the browser. `lib/ai-client.ts` holds the browser-side callers.
+- **Theming** is driven by a `data-theme` attribute set before first paint
+  (`lib/theme-context.tsx`), so there's no flash of the wrong theme.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /api/tutor` | Streaming chat — powers the tutor, doc chat, subject chat, mock interview |
+| `POST /api/notes` | Turns source text into notes, flashcards, a quiz and exam questions |
+| `POST /api/study-plan` | Builds a weekly plan from your subjects and available hours |
+| `POST /api/interview` | Generates role-specific interview questions with model answers |
+
+## Learn More
+
 
 ## Learn More
 
